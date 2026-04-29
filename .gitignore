@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environment
+venv/
+.env/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Data files
+mosaic_leads.xlsx
+*.xlsx
+
+# Temp files
+*.log
+*.tmp
+
+# Streamlit
+.streamlit/
+
+# Outputs
+outputs/
