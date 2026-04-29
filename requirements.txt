@@ -2,5 +2,5 @@ streamlit
 pillow
 numpy
 scipy
-pandas
-openpyxl
+gspread
+google-auth
