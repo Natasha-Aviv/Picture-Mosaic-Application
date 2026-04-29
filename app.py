@@ -9,7 +9,8 @@ from io import BytesIO
 import tempfile
 import os
 import uuid
-import pandas as pd
+import gspread
+from google.oauth2.service_account import Credentials
 from pathlib import Path
 
 MAX_IMAGES = 500
@@ -492,9 +493,9 @@ def get_dynamic_footer_colors(reference_image):
         else:
             footer_bg = tuple(np.clip(footer_bg_arr, 224, 255).astype(int))
 
-        quote_color = (45, 42, 38)
-        soft_color = (88, 80, 72)
-        signature_color = (28, 25, 23)
+        quote_color = (0, 0, 0)
+        soft_color = (70, 64, 58)
+        signature_color = (0, 0, 0)
         divider_color = tuple(int(max(170, c * 0.84)) for c in footer_bg)
 
         return footer_bg, quote_color, soft_color, signature_color, divider_color
@@ -514,7 +515,7 @@ def add_mosaic_footer(image, reference_image=None):
     width, height = img.size
 
     # Smaller footer than before, with proportional scaling.
-    footer_height = max(150, int(height * 0.065))
+    footer_height = max(180, int(height * 0.08))
     padding_x = max(52, int(width * 0.045))
     inner_top = max(22, int(footer_height * 0.18))
     inner_bottom = max(20, int(footer_height * 0.16))
@@ -640,35 +641,66 @@ def add_mosaic_footer(image, reference_image=None):
 
 # ---------------- CORE FUNCTIONS ----------------
 
-def save_to_excel(name, email, file_name):
-    path = Path("mosaic_leads.xlsx")
+def save_to_google_sheets(name, email, file_name):
+    """
+    Save visitor details permanently to Google Sheets.
 
-    new_data = pd.DataFrame([{
-        "Name": name.strip(),
-        "Email": email.strip(),
-        "File": file_name,
-        "Time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    }])
+    Required Streamlit secrets.toml values:
 
+    GOOGLE_SHEET_NAME = "Mosaic Leads"
+
+    [gcp_service_account]
+    type = "service_account"
+    project_id = "..."
+    private_key_id = "..."
+    private_key = "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+    client_email = "...@...iam.gserviceaccount.com"
+    client_id = "..."
+    auth_uri = "https://accounts.google.com/o/oauth2/auth"
+    token_uri = "https://oauth2.googleapis.com/token"
+    auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
+    client_x509_cert_url = "..."
+    universe_domain = "googleapis.com"
+    """
     try:
-        if path.exists():
-            old_data = pd.read_excel(path)
-            final_data = pd.concat([old_data, new_data], ignore_index=True)
-        else:
-            final_data = new_data
+        if "gcp_service_account" not in st.secrets:
+            return False, "Google Sheets is not configured. Add gcp_service_account in Streamlit secrets."
 
-        final_data.to_excel(path, index=False)
+        sheet_name = st.secrets.get("GOOGLE_SHEET_NAME", "Mosaic Leads")
+
+        creds = Credentials.from_service_account_info(
+            st.secrets["gcp_service_account"],
+            scopes=[
+                "https://www.googleapis.com/auth/spreadsheets",
+                "https://www.googleapis.com/auth/drive",
+            ],
+        )
+
+        client = gspread.authorize(creds)
+        sheet = client.open(sheet_name).sheet1
+
+        existing_headers = sheet.row_values(1)
+        required_headers = ["Name", "Email", "File", "Time"]
+        if existing_headers[:4] != required_headers:
+            sheet.update("A1:D1", [required_headers])
+
+        sheet.append_row(
+            [
+                name.strip(),
+                email.strip(),
+                file_name,
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            ],
+            value_input_option="USER_ENTERED",
+        )
+
         return True, None
 
-    except PermissionError:
-        backup_path = Path(f"mosaic_leads_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx")
-        new_data.to_excel(backup_path, index=False)
-        return False, f"Main Excel file is open/locked. Data saved to backup file: {backup_path}"
+    except gspread.exceptions.SpreadsheetNotFound:
+        return False, "Google Sheet not found. Check GOOGLE_SHEET_NAME and share the sheet with the service-account email."
 
     except Exception as e:
-        backup_path = Path(f"mosaic_leads_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx")
-        new_data.to_excel(backup_path, index=False)
-        return False, f"Lead data could not be saved to the main Excel file. Backup saved as: {backup_path}. Reason: {e}"
+        return False, f"Could not save details to Google Sheets: {e}"
 
 
 @st.cache_data(show_spinner=False)
@@ -926,7 +958,7 @@ if files_to_process:
                     st.image(pick.get("original", pick["img"]), use_container_width=True)
 
                     if st.button(f"Use Photo #{i + 1}", key=f"pick_{i}"):
-                        st.session_state.active_target = pick["img"]
+                        st.session_state.active_target = pick.get("original", pick["img"])
                         st.session_state.show_popup = False
                         st.session_state.download_ready = False
                         st.rerun()
@@ -1229,8 +1261,17 @@ if "active_target" in st.session_state and "tiles" in st.session_state:
             st.session_state.final_file_name = f"mosaic_{ts}.{ext}"
             st.session_state.final_mime = f"image/{ext}"
 
+            # Keep full height ratio so footer remains visible in Streamlit preview.
             preview_image = final_output.copy()
-            preview_image.thumbnail((2000, 2000), Image.Resampling.LANCZOS)
+            preview_max_width = 1400
+            if preview_image.width > preview_max_width:
+                preview_image = preview_image.resize(
+                    (
+                        preview_max_width,
+                        int(preview_image.height * preview_max_width / preview_image.width),
+                    ),
+                    Image.Resampling.LANCZOS,
+                )
             st.session_state.preview_image = preview_image
 
             cx = final_output.width // 2
@@ -1338,7 +1379,7 @@ if "final_image_bytes" in st.session_state:
                 elif not email.strip():
                     st.error("Email is required to continue.")
                 else:
-                    saved, message = save_to_excel(
+                    saved, message = save_to_google_sheets(
                         name=name,
                         email=email,
                         file_name=st.session_state.final_file_name
