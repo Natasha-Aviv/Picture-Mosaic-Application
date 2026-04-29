@@ -13,5 +13,5 @@ Create high-resolution photo mosaics using your own image library.
 
 1. Clone the repo:
 ```bash
-git clone https://github.com/your-username/mosaic-studio-pro.git
+git clone https://github.com/your-username/Picture-Mosaic-Application.git
 cd mosaic-studio-pro
