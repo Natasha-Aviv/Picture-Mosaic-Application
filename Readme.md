@@ -1,17 +1,16 @@
 # 🖼️ Mosaic Studio Pro
 
-Create high-resolution photo mosaics using your own image library.
+Create high-resolution photo mosaics from your own image library, with an
+elegant quote footer and a one-click download.
+
+> **Version 1.0** — direct download, no account, no lead capture. The user
+> uploads photos, generates a mosaic, and downloads the master JPEG/PNG/TIFF.
 
 ## ✨ Features
-- Upload multiple images to generate mosaic tiles
-- Smart color matching using KDTree
-- High-resolution export (JPEG, PNG, TIFF)
-- Luxury footer with quotes and branding
-- Immersive UI built with Streamlit
 
-## 🚀 How to Run
-
-1. Clone the repo:
-```bash
-git clone https://github.com/your-username/Picture-Mosaic-Application.git
-cd mosaic-studio-pro
+- Upload up to 500 images as mosaic tiles
+- Smart color matching using a KDTree (vectorized batched queries)
+- EXIF-aware orientation handling so portrait photos render upright
+- High-resolution export (JPEG, PNG, TIFF) with memory-mapped rendering
+- Dynamic, mood-aware footer with curated quotes and "Team Aviv" signature
+- Container-ready for Google Cloud Run, Render, Fly.io, etc.
