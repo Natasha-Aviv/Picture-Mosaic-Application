@@ -2,5 +2,3 @@ streamlit
 pillow
 numpy
 scipy
-gspread
-google-auth
