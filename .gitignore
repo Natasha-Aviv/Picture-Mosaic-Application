@@ -2,10 +2,13 @@
 __pycache__/
 *.pyc
 *.pyo
+*.pyd
 
 # Virtual environment
 venv/
+.venv/
 .env/
+.env
 
 # OS files
 .DS_Store
@@ -18,9 +21,21 @@ mosaic_leads.xlsx
 # Temp files
 *.log
 *.tmp
+*.dat
 
-# Streamlit
-.streamlit/
+# Streamlit secrets only — keep config.toml in git
+.streamlit/secrets.toml
+
+# Service account keys — must NEVER be committed
+*.json
+service-account-*.json
+*-key.json
+gcp-key*.json
 
 # Outputs
 outputs/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
