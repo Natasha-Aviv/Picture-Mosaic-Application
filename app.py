@@ -2,6 +2,7 @@ import streamlit as st
 from PIL import Image, ImageOps, ImageStat, ImageChops, ImageFilter, ImageDraw, ImageFont
 import numpy as np
 import random
+import gc
 import hashlib
 from scipy.spatial import KDTree
 from datetime import datetime
@@ -9,11 +10,13 @@ from io import BytesIO
 import tempfile
 import os
 import uuid
-import gspread
-from google.oauth2.service_account import Credentials
 from pathlib import Path
 
 MAX_IMAGES = 500
+MAX_CUSTOM_TARGET_MP = 60  # cap on custom main portrait megapixels
+
+# Decompression-bomb safety: 200 megapixels is generous for portrait photos.
+Image.MAX_IMAGE_PIXELS = 200_000_000
 
 # ---------------- PAGE CONFIG ----------------
 st.set_page_config(
@@ -25,12 +28,6 @@ st.set_page_config(
 # ---------------- SESSION STATE ----------------
 if "processing" not in st.session_state:
     st.session_state.processing = False
-
-if "show_popup" not in st.session_state:
-    st.session_state.show_popup = False
-
-if "download_ready" not in st.session_state:
-    st.session_state.download_ready = False
 
 # ---------------- IMMERSIVE CUSTOM WEBSITE UI ----------------
 st.markdown(
@@ -332,7 +329,6 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-Image.MAX_IMAGE_PIXELS = None
 
 # ---------------- MOSAIC FOOTER QUOTES ----------------
 
@@ -380,6 +376,8 @@ def get_font(size, style="serif", bold=False):
         Path("fonts"),
         Path("."),
         Path("C:/Windows/Fonts"),
+        Path("/usr/share/fonts/truetype"),
+        Path("/usr/share/fonts"),
     ]
 
     if style == "script":
@@ -452,8 +450,6 @@ def text_width_with_tracking(draw, text, font, tracking=0):
     return max(0, width - tracking)
 
 
-
-
 def get_dynamic_footer_colors(reference_image):
     """
     Creates a soft footer background based on the dominant mood of the portrait.
@@ -501,26 +497,26 @@ def get_dynamic_footer_colors(reference_image):
         return footer_bg, quote_color, soft_color, signature_color, divider_color
 
     except Exception:
-        return (250, 248, 243), (50, 47, 42), (92, 84, 74), (31, 27, 24), (214, 205, 190)
+        return (250, 248, 243), (0, 0, 0), (70, 64, 58), (0, 0, 0), (214, 205, 190)
 
 
-def add_mosaic_footer(image, reference_image=None):
+def add_mosaic_footer(image, reference_image=None, quote_seed=None):
     """
     Compact premium footer with fixed 80%-20% layout:
     - Quote stays as one straight sentence on the left 80%.
     - Regards + calligraphy Team Aviv stays unchanged on the right 20%.
     - Quote font auto-shrinks only if a long quote needs fitting.
+    - quote_seed: optional int/string used to deterministically pick the quote
+      so regenerating the same mosaic shows the same quote.
     """
     img = image.convert("RGB")
     width, height = img.size
 
-    # Smaller footer than before, with proportional scaling.
     footer_height = max(180, int(height * 0.08))
     padding_x = max(52, int(width * 0.045))
     inner_top = max(22, int(footer_height * 0.18))
     inner_bottom = max(20, int(footer_height * 0.16))
 
-    # Dynamic footer color based on the selected portrait/mosaic mood.
     color_source = reference_image if reference_image is not None else img
     footer_bg, quote_color, soft_color, signature_color, divider_color = get_dynamic_footer_colors(color_source)
 
@@ -529,7 +525,6 @@ def add_mosaic_footer(image, reference_image=None):
 
     draw = ImageDraw.Draw(final_with_footer)
 
-    # Thin divider, gently inset with equal padding.
     line_y = height + max(12, int(footer_height * 0.10))
     draw.line(
         (padding_x, line_y, width - padding_x, line_y),
@@ -537,9 +532,13 @@ def add_mosaic_footer(image, reference_image=None):
         width=max(1, int(width * 0.00055))
     )
 
-    quote = random.choice(MOSAIC_QUOTES).replace("\n", " ").strip()
+    if quote_seed is not None:
+        rng = random.Random(quote_seed)
+        quote = rng.choice(MOSAIC_QUOTES)
+    else:
+        quote = random.choice(MOSAIC_QUOTES)
+    quote = quote.replace("\n", " ").strip()
 
-    # 80%-20% fixed layout.
     left_width = int(width * 0.80)
     right_width = width - left_width
 
@@ -547,13 +546,11 @@ def add_mosaic_footer(image, reference_image=None):
     quote_area_right = left_width - max(18, int(width * 0.012))
     quote_max_width = max(80, quote_area_right - quote_area_x)
 
-    # Smaller typography for a more elegant footer.
     base_quote_font_size = max(20, int(width * 0.0135))
     min_quote_font_size = max(12, int(base_quote_font_size * 0.62))
     regards_font_size = max(17, int(width * 0.0105))
     signature_font_size = max(30, int(width * 0.0205))
 
-    # Auto-fit quote so it remains a single straight line inside the left 80%.
     quote_font_size = base_quote_font_size
     quote_font = get_font(quote_font_size, style="serif")
     quote_bbox = draw.textbbox((0, 0), quote, font=quote_font)
@@ -565,7 +562,6 @@ def add_mosaic_footer(image, reference_image=None):
         quote_bbox = draw.textbbox((0, 0), quote, font=quote_font)
         quote_w = quote_bbox[2] - quote_bbox[0]
 
-    # If even the minimum font is too wide, trim cleanly with ellipsis.
     if quote_w > quote_max_width:
         ellipsis = "…"
         trimmed_quote = quote
@@ -582,7 +578,6 @@ def add_mosaic_footer(image, reference_image=None):
     usable_h_end = height + footer_height - inner_bottom
     usable_h = usable_h_end - usable_h_start
 
-    # Draw quote as a single straight sentence in the left 80%.
     quote_h = quote_bbox[3] - quote_bbox[1]
     quote_y = usable_h_start + max(0, (usable_h - quote_h) // 2)
 
@@ -593,7 +588,6 @@ def add_mosaic_footer(image, reference_image=None):
         font=quote_font
     )
 
-    # Right side: keep Regards + Team Aviv style unchanged, fixed inside 20% block.
     regards_line = "Regards,"
     signature_line = "Team Aviv"
     tracking = max(1, int(regards_font_size * 0.07))
@@ -616,7 +610,6 @@ def add_mosaic_footer(image, reference_image=None):
     regards_x = right_center_x - (regards_w // 2)
     signature_x = right_center_x - (sig_w // 2)
 
-    # Safety clamp so signature never crosses too far outside the fixed right area.
     regards_x = max(right_area_x, min(regards_x, right_area_right - regards_w))
     signature_x = max(right_area_x, min(signature_x, right_area_right - sig_w))
 
@@ -641,89 +634,50 @@ def add_mosaic_footer(image, reference_image=None):
 
 # ---------------- CORE FUNCTIONS ----------------
 
-def save_to_google_sheets(name, email, file_name):
-    """
-    Save visitor details permanently to Google Sheets.
+def _open_uploaded_image(uploaded_file):
+    """Open an UploadedFile and apply EXIF orientation; returns RGB Image."""
+    uploaded_file.seek(0)
+    img = Image.open(uploaded_file)
+    img = ImageOps.exif_transpose(img)
+    return img.convert("RGB")
 
-    Required Streamlit secrets.toml values:
 
-    GOOGLE_SHEET_NAME = "Mosaic Leads"
-
-    [gcp_service_account]
-    type = "service_account"
-    project_id = "..."
-    private_key_id = "..."
-    private_key = "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
-    client_email = "...@...iam.gserviceaccount.com"
-    client_id = "..."
-    auth_uri = "https://accounts.google.com/o/oauth2/auth"
-    token_uri = "https://oauth2.googleapis.com/token"
-    auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
-    client_x509_cert_url = "..."
-    universe_domain = "googleapis.com"
-    """
-    try:
-        if "gcp_service_account" not in st.secrets:
-            return False, "Google Sheets is not configured. Add gcp_service_account in Streamlit secrets."
-
-        sheet_name = st.secrets.get("GOOGLE_SHEET_NAME", "Mosaic Leads")
-
-        creds = Credentials.from_service_account_info(
-            st.secrets["gcp_service_account"],
-            scopes=[
-                "https://www.googleapis.com/auth/spreadsheets",
-                "https://www.googleapis.com/auth/drive",
-            ],
-        )
-
-        client = gspread.authorize(creds)
-        sheet = client.open(sheet_name).sheet1
-
-        existing_headers = sheet.row_values(1)
-        required_headers = ["Name", "Email", "File", "Time"]
-        if existing_headers[:4] != required_headers:
-            sheet.update("A1:D1", [required_headers])
-
-        sheet.append_row(
-            [
-                name.strip(),
-                email.strip(),
-                file_name,
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            ],
-            value_input_option="USER_ENTERED",
-        )
-
-        return True, None
-
-    except gspread.exceptions.SpreadsheetNotFound:
-        return False, "Google Sheet not found. Check GOOGLE_SHEET_NAME and share the sheet with the service-account email."
-
-    except Exception as e:
-        return False, f"Could not save details to Google Sheets: {e}"
+def _hash_uploaded_files(file_items):
+    """Stable content hash used as the cache key for the tile library."""
+    h = hashlib.sha256()
+    for item in file_items:
+        item.seek(0)
+        # Hashing full bytes is reliable but can be slow for large libraries.
+        # Stream in chunks to keep peak memory low.
+        for chunk in iter(lambda: item.read(1 << 20), b""):
+            h.update(chunk)
+        item.seek(0)
+    return h.hexdigest()
 
 
 @st.cache_data(show_spinner=False)
-def process_tile_library(file_items, tile_size):
+def _process_tile_library_cached(content_hash: str, tile_size: int, _file_items):
+    """
+    Cached tile builder. The leading-underscore arg is excluded from hashing;
+    `content_hash` and `tile_size` form the actual cache key.
+    """
     processed_tiles = {}
 
-    for item in file_items:
+    for item in _file_items:
         try:
             item.seek(0)
-            sample_bytes = item.read(8192)
-            file_hash_prefix = hashlib.md5(sample_bytes).hexdigest()
-
-            file_id = f"{item.name}_{item.size}_{file_hash_prefix}"
+            file_bytes = item.read()
+            item.seek(0)
+            full_hash = hashlib.md5(file_bytes).hexdigest()
+            file_id = f"{item.name}_{item.size}_{full_hash}"
 
             if file_id in processed_tiles:
                 continue
 
-            item.seek(0)
-            img = Image.open(item).convert("RGB")
+            img = Image.open(BytesIO(file_bytes))
+            img = ImageOps.exif_transpose(img).convert("RGB")
 
-            # IMPORTANT QUALITY FIX:
             # Keep the full-resolution uploaded image for portrait suggestions.
-            # The square `tile` below is only for mosaic tile matching and preview.
             original_img = img.copy()
 
             tile = ImageOps.fit(
@@ -736,10 +690,10 @@ def process_tile_library(file_items, tile_size):
             stddev = ImageStat.Stat(tile.convert("L")).stddev[0]
 
             processed_tiles[file_id] = {
-                "img": tile,                 # resized square tile for mosaic cells
-                "original": original_img,    # full-quality photo for suggested main portrait
+                "img": tile,
+                "original": original_img,
                 "color": avg_color,
-                "stddev": stddev
+                "stddev": stddev,
             }
 
         except Exception:
@@ -748,9 +702,21 @@ def process_tile_library(file_items, tile_size):
     return list(processed_tiles.values())
 
 
+def process_tile_library(file_items, tile_size):
+    """Wrapper that computes a stable hash key for caching."""
+    content_hash = _hash_uploaded_files(file_items)
+    return _process_tile_library_cached(content_hash, tile_size, file_items)
+
+
 @st.cache_resource(show_spinner=False)
+def _build_kdtree_cached(color_key: str, _color_array):
+    return KDTree(_color_array)
+
+
 def build_kdtree(color_array):
-    return KDTree(color_array)
+    """KDTree wrapped with a stable string cache key (numpy arrays don't hash)."""
+    color_key = hashlib.md5(np.ascontiguousarray(color_array).tobytes()).hexdigest()
+    return _build_kdtree_cached(color_key, color_array)
 
 
 def apply_luminosity_blend(mosaic_img, target_img):
@@ -776,7 +742,6 @@ st.markdown(
             </p>
             <div class="hero-pills">
                 <div class="pill">🖼️ High-resolution output</div>
-                <div class="pill">🎨 Luxury quote footer</div>
                 <div class="pill">⚡ Guided 3-step flow</div>
                 <div class="pill">⬇️ Download-ready artwork</div>
             </div>
@@ -910,13 +875,12 @@ if "current_hash" not in st.session_state or st.session_state.current_hash != fi
         "final_file_name",
         "final_mime",
         "preview_image",
-        "crop_img"
+        "crop_img",
+        "mosaic_seed",
     ]:
         if key in st.session_state:
             del st.session_state[key]
 
-    st.session_state.show_popup = False
-    st.session_state.download_ready = False
     st.session_state.processing = False
 
 
@@ -958,9 +922,8 @@ if files_to_process:
                     st.image(pick.get("original", pick["img"]), use_container_width=True)
 
                     if st.button(f"Use Photo #{i + 1}", key=f"pick_{i}"):
+                        # Use full-quality original as the active target.
                         st.session_state.active_target = pick.get("original", pick["img"])
-                        st.session_state.show_popup = False
-                        st.session_state.download_ready = False
                         st.rerun()
 
             st.divider()
@@ -972,19 +935,35 @@ if files_to_process:
             )
 
             if custom_target_file:
-                custom_img = Image.open(custom_target_file).convert("RGB")
+                try:
+                    custom_img = _open_uploaded_image(custom_target_file)
+                    mp = (custom_img.width * custom_img.height) / 1_000_000
 
-                col_preview, col_btn = st.columns([1, 4])
+                    if mp > MAX_CUSTOM_TARGET_MP:
+                        st.warning(
+                            f"⚠️ Main photo is {mp:.0f} MP, which is larger than the "
+                            f"{MAX_CUSTOM_TARGET_MP} MP limit. Downscaling for performance."
+                        )
+                        scale = (MAX_CUSTOM_TARGET_MP / mp) ** 0.5
+                        new_size = (
+                            max(1, int(custom_img.width * scale)),
+                            max(1, int(custom_img.height * scale)),
+                        )
+                        custom_img = custom_img.resize(new_size, Image.Resampling.LANCZOS)
+                except Exception as e:
+                    st.error(f"Could not read uploaded photo: {e}")
+                    custom_img = None
 
-                with col_preview:
-                    st.image(custom_img, use_container_width=True)
+                if custom_img is not None:
+                    col_preview, col_btn = st.columns([1, 4])
 
-                with col_btn:
-                    if st.button("✅ Set as Main Portrait", type="primary"):
-                        st.session_state.active_target = custom_img
-                        st.session_state.show_popup = False
-                        st.session_state.download_ready = False
-                        st.rerun()
+                    with col_preview:
+                        st.image(custom_img, use_container_width=True)
+
+                    with col_btn:
+                        if st.button("✅ Set as Main Portrait", type="primary", key="set_main_portrait_btn"):
+                            st.session_state.active_target = custom_img
+                            st.rerun()
 
 
 # ---------------- GENERATOR ----------------
@@ -1085,13 +1064,15 @@ if "active_target" in st.session_state and "tiles" in st.session_state:
             generate = st.button(
                 "✨ Create My Mosaic Artwork",
                 type="primary",
-                use_container_width=True
+                use_container_width=True,
+                key="generate_mosaic_btn",
             )
 
     if generate and not st.session_state.processing:
         st.session_state.processing = True
-        st.session_state.show_popup = False
-        st.session_state.download_ready = False
+
+        memmap_path = None
+        canvas_mem = None
 
         try:
             tiles = st.session_state.tiles
@@ -1132,6 +1113,12 @@ if "active_target" in st.session_state and "tiles" in st.session_state:
                 3
             ).mean(axis=(1, 3))
 
+            # ---- Vectorized KDTree query: one batched call instead of grid_h * density ----
+            k_query = min(random_k + 4, len(tiles))
+            flat_blocks = target_blocks.reshape(-1, 3)
+            _, all_idxs = tree.query(flat_blocks, k=k_query)
+            all_idxs = np.atleast_2d(all_idxs).reshape(grid_h, density, -1)
+
             placed_indices = np.zeros((grid_h, density), dtype=int)
 
             temp_dir = tempfile.gettempdir()
@@ -1156,16 +1143,11 @@ if "active_target" in st.session_state and "tiles" in st.session_state:
 
             pb = progress_bar.progress(0)
 
+            flush_every = max(1, grid_h // 16)
+
             for y in range(grid_h):
                 for x in range(density):
-                    reg_color = target_blocks[y, x]
-
-                    _, idxs = tree.query(
-                        reg_color,
-                        k=min(random_k + 4, len(tiles))
-                    )
-
-                    idxs = np.atleast_1d(idxs)
+                    idxs = all_idxs[y, x]
 
                     target_box = (
                         x * tile_res,
@@ -1183,12 +1165,12 @@ if "active_target" in st.session_state and "tiles" in st.session_state:
                         nx = x + dx
 
                         if 0 <= ny < grid_h and 0 <= nx < density:
-                            neighbors.add(placed_indices[ny, nx])
+                            neighbors.add(int(placed_indices[ny, nx]))
 
-                    candidates = [i for i in idxs if i not in neighbors]
+                    candidates = [int(i) for i in idxs if int(i) not in neighbors]
 
                     if not candidates:
-                        candidates = [idxs[0]]
+                        candidates = [int(idxs[0])]
 
                     best_idx = int(random.choice(candidates[:random_k]))
                     placed_indices[y, x] = best_idx
@@ -1225,9 +1207,9 @@ if "active_target" in st.session_state and "tiles" in st.session_state:
                         x * tile_res:(x + 1) * tile_res
                     ] = np.array(final_tile)
 
-                canvas_mem.flush()
-
-                if y % max(1, grid_h // 20) == 0 or y == grid_h - 1:
+                # Flush in chunks instead of every row.
+                if y % flush_every == 0 or y == grid_h - 1:
+                    canvas_mem.flush()
                     pb.progress((y + 1) / grid_h)
 
             status_text.empty()
@@ -1235,8 +1217,14 @@ if "active_target" in st.session_state and "tiles" in st.session_state:
 
             final_output = Image.fromarray(np.array(canvas_mem).copy())
 
-            # Add random quote footer below the completed mosaic.
-            final_output = add_mosaic_footer(final_output, reference_image=target)
+            # Deterministic quote choice based on the file hash, so regenerating the
+            # same library + portrait yields the same quote.
+            quote_seed = st.session_state.get("current_hash") or str(uuid.uuid4())
+            final_output = add_mosaic_footer(
+                final_output,
+                reference_image=target,
+                quote_seed=quote_seed,
+            )
 
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             ext = export_fmt.lower()
@@ -1288,22 +1276,33 @@ if "active_target" in st.session_state and "tiles" in st.session_state:
             )
 
             del final_output
-            del canvas_mem
 
+        except Exception as e:
+            st.error(f"Something went wrong while generating the mosaic: {e}")
+
+        finally:
+            # Always clean up the memmap file, even on failure.
             try:
-                os.remove(memmap_path)
+                if canvas_mem is not None:
+                    del canvas_mem
+                gc.collect()
             except Exception:
                 pass
 
-            st.session_state.processing = False
-            st.rerun()
+            if memmap_path and os.path.exists(memmap_path):
+                try:
+                    os.remove(memmap_path)
+                except Exception:
+                    pass
 
-        except Exception as e:
             st.session_state.processing = False
-            st.error(f"Something went wrong while generating the mosaic: {e}")
+
+        if "final_image_bytes" in st.session_state:
+            st.rerun()
 
 
 # ---------------- FINAL OUTPUT + DOWNLOAD ----------------
+
 
 if "final_image_bytes" in st.session_state:
     st.markdown(
@@ -1314,7 +1313,7 @@ if "final_image_bytes" in st.session_state:
                 <div>
                     <div class="step-title">Your mosaic is ready</div>
                     <div class="muted-text">
-                        Preview the completed artwork, inspect a 1:1 crop, then unlock the high-resolution download.
+                        Preview the completed artwork, inspect a 1:1 crop, and download the high-resolution master file.
                     </div>
                 </div>
             </div>
@@ -1340,67 +1339,17 @@ if "final_image_bytes" in st.session_state:
         """
         <div class="download-panel">
             <h2>Download your finished artwork</h2>
-            <p>Your high-resolution mosaic is ready. Enter your name and email to unlock the master file.</p>
+            <p>Your high-resolution mosaic is ready.</p>
         </div>
         """,
         unsafe_allow_html=True
     )
 
-    if st.button("Unlock Download", use_container_width=True):
-        st.session_state.show_popup = True
-        st.session_state.download_ready = False
-
-    if st.session_state.show_popup:
-        st.markdown(
-            """
-            <div class="form-card">
-                <h3>Almost done</h3>
-                <p>Name and email are required before download.</p>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-
-        name = st.text_input("Name *", key="download_name")
-        email = st.text_input("Email *", key="download_email")
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-            if st.button("Cancel", use_container_width=True):
-                st.session_state.show_popup = False
-                st.session_state.download_ready = False
-                st.rerun()
-
-        with col2:
-            if st.button("Continue", use_container_width=True):
-                if not name.strip():
-                    st.error("Name is required to continue.")
-                elif not email.strip():
-                    st.error("Email is required to continue.")
-                else:
-                    saved, message = save_to_google_sheets(
-                        name=name,
-                        email=email,
-                        file_name=st.session_state.final_file_name
-                    )
-
-                    if not saved:
-                        st.warning(message)
-                    else:
-                        st.success("✅ Details saved successfully!")
-
-                    st.session_state.show_popup = False
-                    st.session_state.download_ready = True
-                    st.rerun()
-
-    if st.session_state.download_ready:
-        st.success("✅ Download unlocked!")
-
-        st.download_button(
-            label="⬇️ Download High-Resolution Artwork",
-            data=st.session_state.final_image_bytes,
-            file_name=st.session_state.final_file_name,
-            mime=st.session_state.final_mime,
-            use_container_width=True
-        )
+    st.download_button(
+        label="⬇️ Download High-Resolution Artwork",
+        data=st.session_state.final_image_bytes,
+        file_name=st.session_state.final_file_name,
+        mime=st.session_state.final_mime,
+        use_container_width=True,
+        key="download_artwork_btn",
+    )
