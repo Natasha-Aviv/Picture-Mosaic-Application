@@ -4,7 +4,6 @@ import numpy as np
 import random
 import gc
 import hashlib
-from scipy.spatial import KDTree
 from datetime import datetime
 from io import BytesIO
 import tempfile
@@ -729,15 +728,37 @@ def process_tile_library(file_items, tile_size):
     return _process_tile_library_cached(content_hash, tile_size, file_items)
 
 
-@st.cache_resource(show_spinner=False)
-def _build_kdtree_cached(color_key: str, _color_array):
-    return KDTree(_color_array)
+@st.cache_data(show_spinner=False)
+def nearest_tile_indices(color_key: str, _tile_colors, _flat_blocks, k_query: int, chunk_size: int = 4096):
+    """
+    SciPy-free nearest-colour lookup.
 
+    Streamlit Cloud sometimes fails while installing heavy SciPy wheels, so this
+    version uses NumPy only. It returns the k closest tile indexes for every
+    block colour, processed in chunks to avoid high memory usage.
+    """
+    tile_colors = np.asarray(_tile_colors, dtype=np.float32)
+    flat_blocks = np.asarray(_flat_blocks, dtype=np.float32)
+    k_query = int(max(1, min(k_query, len(tile_colors))))
 
-def build_kdtree(color_array):
-    """KDTree wrapped with a stable string cache key (numpy arrays don't hash)."""
-    color_key = hashlib.md5(np.ascontiguousarray(color_array).tobytes()).hexdigest()
-    return _build_kdtree_cached(color_key, color_array)
+    results = []
+    for start in range(0, len(flat_blocks), chunk_size):
+        block_chunk = flat_blocks[start:start + chunk_size]
+        diff = block_chunk[:, None, :] - tile_colors[None, :, :]
+        dist2 = np.sum(diff * diff, axis=2)
+
+        if k_query == 1:
+            nearest = np.argmin(dist2, axis=1)[:, None]
+        else:
+            nearest_unsorted = np.argpartition(dist2, kth=k_query - 1, axis=1)[:, :k_query]
+            row_order = np.arange(nearest_unsorted.shape[0])[:, None]
+            nearest_dist = dist2[row_order, nearest_unsorted]
+            order = np.argsort(nearest_dist, axis=1)
+            nearest = nearest_unsorted[row_order, order]
+
+        results.append(nearest.astype(np.int32))
+
+    return np.vstack(results)
 
 
 def apply_luminosity_blend(mosaic_img, target_img):
@@ -1098,8 +1119,7 @@ if "active_target" in st.session_state and "tiles" in st.session_state:
         try:
             tiles = st.session_state.tiles
 
-            tile_colors = np.array([t["color"] for t in tiles])
-            tree = build_kdtree(tile_colors)
+            tile_colors = np.array([t["color"] for t in tiles], dtype=np.float32)
 
             target = st.session_state.active_target.convert("RGB")
 
@@ -1134,11 +1154,12 @@ if "active_target" in st.session_state and "tiles" in st.session_state:
                 3
             ).mean(axis=(1, 3))
 
-            # ---- Vectorized KDTree query: one batched call instead of grid_h * density ----
+            # ---- SciPy-free nearest colour search. Streamlit Cloud-safe. ----
             k_query = min(random_k + 4, len(tiles))
-            flat_blocks = target_blocks.reshape(-1, 3)
-            _, all_idxs = tree.query(flat_blocks, k=k_query)
-            all_idxs = np.atleast_2d(all_idxs).reshape(grid_h, density, -1)
+            flat_blocks = target_blocks.reshape(-1, 3).astype(np.float32)
+            color_key = hashlib.md5(np.ascontiguousarray(tile_colors).tobytes()).hexdigest()
+            all_idxs = nearest_tile_indices(color_key, tile_colors, flat_blocks, k_query)
+            all_idxs = all_idxs.reshape(grid_h, density, -1)
 
             placed_indices = np.zeros((grid_h, density), dtype=int)
 
