@@ -1,41 +1,36 @@
-# Python
+# Python cache
 __pycache__/
-*.pyc
+*.py[cod]
 *.pyo
-*.pyd
 
-# Virtual environment
+# Virtual environments
 venv/
+env/
 .venv/
-.env/
-.env
+
+# Streamlit secrets
+.streamlit/secrets.toml
 
 # OS files
 .DS_Store
 Thumbs.db
 
-# Data files
-mosaic_leads.xlsx
-*.xlsx
+# IDE files
+.vscode/
+.idea/
 
-# Temp files
+# Logs
 *.log
-*.tmp
-*.dat
 
-# Streamlit secrets only — keep config.toml in git
-.streamlit/secrets.toml
+# Temporary files
+temp/
+tmp/
 
-# Service account keys — must NEVER be committed
-*.json
-service-account-*.json
-*-key.json
-gcp-key*.json
-
-# Outputs
+# Uploaded/generated images
+uploads/
 outputs/
-
-# Build artifacts
-build/
-dist/
-*.egg-info/
+generated/
+*.png
+*.jpg
+*.jpeg
+*.webp
