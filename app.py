@@ -364,21 +364,14 @@ MOSAIC_QUOTES = [
 
 def get_font(size, style="serif", bold=False):
     """
-    Safely load premium fonts.
-    For calligraphy, put any of these fonts inside assets/fonts/:
-    - GreatVibes-Regular.ttf
-    - Allura-Regular.ttf
-    - DancingScript-Regular.ttf
-    - Parisienne-Regular.ttf
+    Streamlit Cloud-safe font loader.
+
+    Important: Streamlit Cloud runs on Linux, not Windows. Fonts like
+    Georgia.ttf, Arial.ttf, Segoe Script.ttf may not exist there. This function
+    searches recursively through common Linux font folders and falls back to
+    DejaVu fonts, which are normally available in Streamlit deployments.
     """
-    font_dirs = [
-        Path("assets/fonts"),
-        Path("fonts"),
-        Path("."),
-        Path("C:/Windows/Fonts"),
-        Path("/usr/share/fonts/truetype"),
-        Path("/usr/share/fonts"),
-    ]
+    size = int(max(8, size))
 
     if style == "script":
         possible_fonts = [
@@ -392,9 +385,9 @@ def get_font(size, style="serif", bold=False):
             "segoesc.ttf",
             "Brush Script MT.ttf",
             "BRUSHSCI.TTF",
-            "ariali.ttf",
-            "Arial Italic.ttf",
             "DejaVuSerif-Italic.ttf",
+            "DejaVuSans-Oblique.ttf",
+            "LiberationSerif-Italic.ttf",
         ]
     elif style == "serif":
         possible_fonts = [
@@ -403,6 +396,7 @@ def get_font(size, style="serif", bold=False):
             "Times New Roman.ttf",
             "times.ttf",
             "DejaVuSerif.ttf",
+            "LiberationSerif-Regular.ttf",
             "NotoSerif-Regular.ttf",
         ]
     else:
@@ -410,28 +404,49 @@ def get_font(size, style="serif", bold=False):
             "arialbd.ttf" if bold else "arial.ttf",
             "Arial Bold.ttf" if bold else "Arial.ttf",
             "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf",
+            "LiberationSans-Bold.ttf" if bold else "LiberationSans-Regular.ttf",
             "NotoSans-Bold.ttf" if bold else "NotoSans-Regular.ttf",
         ]
 
-    # First try bundled / local font files.
-    for folder in font_dirs:
+    font_roots = [
+        Path("assets/fonts"),
+        Path("fonts"),
+        Path("."),
+        Path("C:/Windows/Fonts"),
+        Path("/usr/share/fonts"),
+        Path("/usr/local/share/fonts"),
+    ]
+
+    # 1) Direct local/bundled lookup.
+    for root in font_roots:
         for font_name in possible_fonts:
-            font_path = folder / font_name
+            font_path = root / font_name
             try:
                 if font_path.exists():
-                    return ImageFont.truetype(str(font_path), size)
+                    return ImageFont.truetype(str(font_path), size=size)
             except Exception:
                 pass
 
-    # Then try system font lookup by name.
+    # 2) Recursive Linux lookup. This fixes Streamlit Cloud font issues.
+    for root in font_roots:
+        try:
+            if root.exists():
+                lower_targets = {name.lower() for name in possible_fonts}
+                for font_path in root.rglob("*.ttf"):
+                    if font_path.name.lower() in lower_targets:
+                        return ImageFont.truetype(str(font_path), size=size)
+        except Exception:
+            pass
+
+    # 3) Fontconfig/name lookup.
     for font_name in possible_fonts:
         try:
-            return ImageFont.truetype(font_name, size)
+            return ImageFont.truetype(font_name, size=size)
         except Exception:
             continue
 
+    # 4) Last fallback: use PIL bundled default. It is small, but prevents crash.
     return ImageFont.load_default()
-
 
 def draw_text_with_tracking(draw, position, text, font, fill, tracking=0):
     """Draw single-line text with small letter spacing."""
@@ -502,54 +517,60 @@ def get_dynamic_footer_colors(reference_image):
 
 def add_mosaic_footer(image, reference_image=None, quote_seed=None):
     """
-    Compact premium footer with fixed 80%-20% layout:
-    - Quote stays as one straight sentence on the left 80%.
-    - Regards + calligraphy Team Aviv stays unchanged on the right 20%.
-    - Quote font auto-shrinks only if a long quote needs fitting.
-    - quote_seed: optional int/string used to deterministically pick the quote
-      so regenerating the same mosaic shows the same quote.
+    Adds the actual quote + Regards, Team Aviv footer INSIDE the exported mosaic image.
+
+    This version is Streamlit Cloud-safe:
+    - uses Linux-safe font loading through get_font()
+    - keeps enough footer height for text visibility
+    - avoids clipping on small/narrow output images
+    - keeps the footer included in preview and download bytes
     """
     img = image.convert("RGB")
     width, height = img.size
 
-    footer_height = max(180, int(height * 0.08))
-    padding_x = max(52, int(width * 0.045))
-    inner_top = max(22, int(footer_height * 0.18))
-    inner_bottom = max(20, int(footer_height * 0.16))
+    # Make footer bigger on small outputs so it does not look hidden on Streamlit preview.
+    footer_height = max(220, int(height * 0.12))
+    padding_x = max(28, int(width * 0.04))
+    inner_top = max(28, int(footer_height * 0.18))
+    inner_bottom = max(24, int(footer_height * 0.14))
 
     color_source = reference_image if reference_image is not None else img
     footer_bg, quote_color, soft_color, signature_color, divider_color = get_dynamic_footer_colors(color_source)
 
     final_with_footer = Image.new("RGB", (width, height + footer_height), footer_bg)
     final_with_footer.paste(img, (0, 0))
-
     draw = ImageDraw.Draw(final_with_footer)
 
-    line_y = height + max(12, int(footer_height * 0.10))
+    line_y = height + max(14, int(footer_height * 0.10))
     draw.line(
         (padding_x, line_y, width - padding_x, line_y),
         fill=divider_color,
-        width=max(1, int(width * 0.00055))
+        width=max(2, int(width * 0.001))
     )
 
-    if quote_seed is not None:
-        rng = random.Random(quote_seed)
-        quote = rng.choice(MOSAIC_QUOTES)
+    rng = random.Random(quote_seed) if quote_seed is not None else random
+    quote = rng.choice(MOSAIC_QUOTES).replace("\n", " ").strip()
+
+    # Use two-column layout only when there is enough width. Otherwise stack text.
+    two_column = width >= 900
+    if two_column:
+        left_width = int(width * 0.74)
+        quote_area_x = padding_x
+        quote_area_right = left_width - max(16, int(width * 0.012))
+        right_area_x = left_width
+        right_area_right = width - padding_x
     else:
-        quote = random.choice(MOSAIC_QUOTES)
-    quote = quote.replace("\n", " ").strip()
+        quote_area_x = padding_x
+        quote_area_right = width - padding_x
+        right_area_x = padding_x
+        right_area_right = width - padding_x
 
-    left_width = int(width * 0.80)
-    right_width = width - left_width
-
-    quote_area_x = padding_x
-    quote_area_right = left_width - max(18, int(width * 0.012))
     quote_max_width = max(80, quote_area_right - quote_area_x)
 
-    base_quote_font_size = max(20, int(width * 0.0135))
-    min_quote_font_size = max(12, int(base_quote_font_size * 0.62))
-    regards_font_size = max(17, int(width * 0.0105))
-    signature_font_size = max(30, int(width * 0.0205))
+    base_quote_font_size = max(18, int(width * 0.018 if not two_column else width * 0.014))
+    min_quote_font_size = max(12, int(base_quote_font_size * 0.65))
+    regards_font_size = max(16, int(width * 0.013 if not two_column else width * 0.0105))
+    signature_font_size = max(28, int(width * 0.030 if not two_column else width * 0.0205))
 
     quote_font_size = base_quote_font_size
     quote_font = get_font(quote_font_size, style="serif")
@@ -569,24 +590,15 @@ def add_mosaic_footer(image, reference_image=None, quote_seed=None):
             trimmed_quote = trimmed_quote[:-1].rstrip()
         quote = trimmed_quote + ellipsis
         quote_bbox = draw.textbbox((0, 0), quote, font=quote_font)
+        quote_w = quote_bbox[2] - quote_bbox[0]
 
     regards_font = get_font(regards_font_size, style="sans", bold=False)
     signature_font = get_font(signature_font_size, style="script")
-    signature_gap = max(3, int(signature_font_size * 0.08))
+    signature_gap = max(4, int(signature_font_size * 0.10))
 
     usable_h_start = height + inner_top
     usable_h_end = height + footer_height - inner_bottom
-    usable_h = usable_h_end - usable_h_start
-
-    quote_h = quote_bbox[3] - quote_bbox[1]
-    quote_y = usable_h_start + max(0, (usable_h - quote_h) // 2)
-
-    draw.text(
-        (quote_area_x, quote_y),
-        quote,
-        fill=quote_color,
-        font=quote_font
-    )
+    usable_h = max(50, usable_h_end - usable_h_start)
 
     regards_line = "Regards,"
     signature_line = "Team Aviv"
@@ -600,13 +612,19 @@ def add_mosaic_footer(image, reference_image=None, quote_seed=None):
     sig_w = sig_bbox[2] - sig_bbox[0]
     sig_h = sig_bbox[3] - sig_bbox[1]
 
-    block_h = regards_h + signature_gap + sig_h
-    block_y = usable_h_start + max(0, (usable_h - block_h) // 2)
+    if two_column:
+        quote_h = quote_bbox[3] - quote_bbox[1]
+        quote_y = usable_h_start + max(0, (usable_h - quote_h) // 2)
+        block_h = regards_h + signature_gap + sig_h
+        block_y = usable_h_start + max(0, (usable_h - block_h) // 2)
+    else:
+        # Stacked layout: quote at top, brand centered below.
+        quote_y = height + max(32, int(footer_height * 0.22))
+        block_y = quote_y + (quote_bbox[3] - quote_bbox[1]) + max(18, int(footer_height * 0.10))
 
-    right_area_x = left_width
-    right_area_right = width - padding_x
+    draw.text((quote_area_x, quote_y), quote, fill=quote_color, font=quote_font)
+
     right_center_x = right_area_x + max(0, (right_area_right - right_area_x) // 2)
-
     regards_x = right_center_x - (regards_w // 2)
     signature_x = right_center_x - (sig_w // 2)
 
@@ -1225,6 +1243,7 @@ if "active_target" in st.session_state and "tiles" in st.session_state:
                 reference_image=target,
                 quote_seed=quote_seed,
             )
+            st.session_state.footer_added = True
 
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             ext = export_fmt.lower()
@@ -1322,9 +1341,12 @@ if "final_image_bytes" in st.session_state:
         unsafe_allow_html=True
     )
 
+    if st.session_state.get("footer_added"):
+        st.success("Footer added inside the final image: quote + Regards, Team Aviv")
+
     st.image(
         st.session_state.preview_image,
-        caption="Web Preview - downscaled for browser",
+        caption="Web Preview - downscaled for browser. Scroll to the bottom of the preview to see the embedded footer.",
         use_container_width=True
     )
 
