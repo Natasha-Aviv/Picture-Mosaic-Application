@@ -374,7 +374,10 @@ def get_font(size, style="serif", bold=False):
     size = int(max(8, size))
 
     if style == "script":
+        # For exact calligraphy on Streamlit Cloud, place your chosen script font here:
+        # assets/fonts/TeamAvivCalligraphy.ttf
         possible_fonts = [
+            "TeamAvivCalligraphy.ttf",
             "GreatVibes-Regular.ttf",
             "Allura-Regular.ttf",
             "DancingScript-Regular.ttf",
