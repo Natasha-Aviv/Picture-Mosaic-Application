@@ -11,8 +11,8 @@ import os
 import uuid
 from pathlib import Path
 
-MAX_IMAGES = 250
-MAX_CUSTOM_TARGET_MP = 25  # cap on custom main portrait megapixels
+MAX_IMAGES = 120          # Streamlit Cloud free tier ~1 GB RAM -- keep tile uploads bounded
+MAX_CUSTOM_TARGET_MP = 12 # cap on custom main portrait megapixels (was 25, too heavy for Cloud)
 
 # Decompression-bomb safety: 200 megapixels is generous for portrait photos.
 Image.MAX_IMAGE_PIXELS = 200_000_000
@@ -803,16 +803,17 @@ with st.sidebar:
     tile_res = st.select_slider(
         "Tile Resolution (px)",
         options=[16, 32, 64, 128],
-        value=64,
-        help="Size of each tiny photo tile."
+        value=32,
+        help="Size of each tiny photo tile. 32 is the sweet spot for Streamlit Cloud."
     )
 
     density = st.slider(
         "Grid Density Across",
         min_value=40,
-        max_value=220,
-        value=120,
-        help="Higher value gives more detail but creates a larger file."
+        max_value=180,
+        value=80,
+        help="Higher value gives more detail but uses more memory. "
+             "On Streamlit Cloud free tier, keep density x tile_res <= 4000 to stay under the RAM cap."
     )
 
     st.divider()
@@ -1094,13 +1095,23 @@ if "active_target" in st.session_state and "tiles" in st.session_state:
                 unsafe_allow_html=True
             )
 
-        if estimated_mp > 80:
+        # Hard guardrail: Streamlit Cloud free tier dies above ~60 MP for this pipeline.
+        too_big = estimated_mp > 60
+
+        if too_big:
+            st.error(
+                f"⛔ {estimated_mp:.0f} MP is too large for Streamlit Cloud free tier. "
+                "Reduce Grid Density or Tile Resolution in the sidebar so the estimate is under 60 MP."
+            )
+        elif estimated_mp > 35:
             st.warning(
-                "⚠️ Very high quality selected. This may be slow or fail on free hosting."
+                "⚠️ High quality selected. Generation may take a while on free hosting."
             )
 
         if st.session_state.processing:
             st.warning("⚠️ Processing is already running. Please wait.")
+            generate = False
+        elif too_big:
             generate = False
         else:
             generate = st.button(
@@ -1257,7 +1268,26 @@ if "active_target" in st.session_state and "tiles" in st.session_state:
             status_text.empty()
             progress_bar.empty()
 
-            final_output = Image.fromarray(np.array(canvas_mem).copy())
+            # ---- Memory-safe handoff to PIL ----
+            # Drop large intermediates BEFORE we materialize the full PIL image,
+            # so peak RAM stays close to a single canvas copy.
+            try:
+                del target_res, target_rgb, target_blocks, all_idxs, placed_indices
+            except Exception:
+                pass
+            gc.collect()
+
+            # Build PIL image directly from the memmap buffer (avoids the extra
+            # np.array().copy() which previously doubled peak memory).
+            final_output = Image.frombuffer(
+                "RGB",
+                (full_w, full_h),
+                bytes(canvas_mem),
+                "raw",
+                "RGB",
+                0,
+                1,
+            )
 
             # Deterministic quote choice based on the file hash, so regenerating the
             # same library + portrait yields the same quote.
