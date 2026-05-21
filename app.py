@@ -11,8 +11,8 @@ import os
 import uuid
 from pathlib import Path
 
-MAX_IMAGES = 500
-MAX_CUSTOM_TARGET_MP = 60  # cap on custom main portrait megapixels
+MAX_IMAGES = 250
+MAX_CUSTOM_TARGET_MP = 25  # cap on custom main portrait megapixels
 
 # Decompression-bomb safety: 200 megapixels is generous for portrait photos.
 Image.MAX_IMAGE_PIXELS = 200_000_000
@@ -675,7 +675,7 @@ def _hash_uploaded_files(file_items):
     return h.hexdigest()
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=1800, max_entries=1)
 def _process_tile_library_cached(content_hash: str, tile_size: int, _file_items):
     """
     Cached tile builder. The leading-underscore arg is excluded from hashing;
@@ -728,7 +728,7 @@ def process_tile_library(file_items, tile_size):
     return _process_tile_library_cached(content_hash, tile_size, file_items)
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=1800, max_entries=2)
 def nearest_tile_indices(color_key: str, _tile_colors, _flat_blocks, k_query: int, chunk_size: int = 4096):
     """
     SciPy-free nearest-colour lookup.
@@ -810,8 +810,8 @@ with st.sidebar:
     density = st.slider(
         "Grid Density Across",
         min_value=40,
-        max_value=300,
-        value=150,
+        max_value=220,
+        value=120,
         help="Higher value gives more detail but creates a larger file."
     )
 
